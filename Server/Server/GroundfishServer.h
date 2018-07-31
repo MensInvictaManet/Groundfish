@@ -30,7 +30,7 @@ public:
 	void AcceptNewClients(void);
 	void Messages_Clients(void);
 
-	void SendChatString(char* String);
+	void SendChatString(const char* String);
 
 	inline std::string	GetClientIP(int i) { return C_IPAddr[i]; }
 };
@@ -125,8 +125,18 @@ void Server::Messages_Clients(void)
 			break;
 
 		case 2:
-			SendChatString(winsockWrapper.ReadString(0));
-			break;
+			{
+				int messageSize = winsockWrapper.ReadInt(0);
+
+				//  Decrypt using Groundfish
+				unsigned char encrypted[256];
+				memcpy(encrypted, winsockWrapper.ReadChars(0, messageSize), messageSize);
+				char decrypted[256];
+				Groundfish::Decrypt(encrypted, decrypted);
+
+				SendChatString(decrypted);
+				break;
+			}
 
 		case 3:
 			char NewString[100];
@@ -146,7 +156,7 @@ void Server::Messages_Clients(void)
 //	Program Functionality
 ////////////////////////////////////////
 
-void Server::SendChatString(char* String)
+void Server::SendChatString(const char* String)
 {
 	for (int i = 0; i < Client_Count; i += 1)
 	{
@@ -155,7 +165,7 @@ void Server::SendChatString(char* String)
 
 		//  Encrypt the string using Groundfish
 		unsigned char encrypted[256];
-		int messageSize = Groundfish::Encrypt(String, encrypted, strlen(String) + 1, 0, rand() % 256);
+		int messageSize = Groundfish::Encrypt(String, encrypted, int(strlen(String)) + 1, 0, rand() % 256);
 
 		winsockWrapper.WriteInt(messageSize, 0);
 		winsockWrapper.WriteChars(encrypted, messageSize, 0);

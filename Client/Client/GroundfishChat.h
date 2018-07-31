@@ -11,20 +11,26 @@ using namespace std;
 
 #define DIALOGUE_LINES		21
 #define MAX_LINE_LENGTH		75
-#define VALID_KEYS			29
+
+#define SERVER_IP_LENGTH	128
+#define USER_NAME_LENGTH	32
+
+#define FIRST_CHARACTER		32		//  SPACEBAR
+#define LAST_CHARACTER		126		//  TILDE (~)
+#define ACCEPTED_CHARACTERS	(LAST_CHARACTER - FIRST_CHARACTER + 1)
 
 class Chat
 {
 private:
 	int			ServerSocket;
-	char		ServerIP[16];
+	char		ServerIP[SERVER_IP_LENGTH];
 
-	char		Name[16];
+	char		Name[USER_NAME_LENGTH];
 	char		Dialogue[DIALOGUE_LINES][MAX_LINE_LENGTH + 1];
 	bool		NoDrawNeeded[2];
 	char		InputLine[MAX_LINE_LENGTH];
 
-	char		NoRepeat[VALID_KEYS];
+	char		NoRepeat[ACCEPTED_CHARACTERS + 1]; //  Adding 1 because of the backspace repeat removal
 
 public:
 	Chat(void) {}
@@ -45,7 +51,7 @@ public:
 
 bool Chat::Initialize(const char* IP)
 {
-	strcpy_s(ServerIP, 16, IP);
+	strcpy_s(ServerIP, SERVER_IP_LENGTH, IP);
 
 	// Connect to the given server
 	ServerSocket = winsockWrapper.TCPConnect(ServerIP, SERVER_PORT, 1);
@@ -53,7 +59,7 @@ bool Chat::Initialize(const char* IP)
 
 	system("cls");
 	cout << " Please enter a name for yourself (<16 characters): ";
-	cin.get(Name, 16);
+	cin.get(Name, USER_NAME_LENGTH);
 	cin.get();
 
 	if (strcmp(Name, "") == 0) strcpy_s(Name, strlen("Guest") + 1, "Guest");
@@ -70,7 +76,7 @@ bool Chat::Initialize(const char* IP)
 	for (int i = 0; i < MAX_LINE_LENGTH; i += 1) InputLine[i] = 0;
 	NoDrawNeeded[0] = false;
 
-	for (int i = 0; i < VALID_KEYS; i += 1) NoRepeat[i] = false;
+	for (int i = 0; i < ACCEPTED_CHARACTERS; i += 1) NoRepeat[i] = false;
 
 	DrawOutline();
 
@@ -106,18 +112,18 @@ bool Chat::ReadMessages(void)
 		winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
 		break;
 	case 2:
-		{
-			int messageSize = winsockWrapper.ReadInt(0);
+	{
+		int messageSize = winsockWrapper.ReadInt(0);
 
-			//  Decrypt using Groundfish
-			unsigned char encrypted[256];
-			memcpy(encrypted, winsockWrapper.ReadChars(0, messageSize), messageSize);
-			char decrypted[256];
-			Groundfish::Decrypt(encrypted, decrypted);
+		//  Decrypt using Groundfish
+		unsigned char encrypted[256];
+		memcpy(encrypted, winsockWrapper.ReadChars(0, messageSize), messageSize);
+		char decrypted[256];
+		Groundfish::Decrypt(encrypted, decrypted);
 
-			NewLine(decrypted);
-		}
-		break;
+		NewLine(decrypted);
+	}
+	break;
 	}
 
 	return true;
@@ -125,7 +131,9 @@ bool Chat::ReadMessages(void)
 
 void Chat::NewLine(char* NewString)
 {
-	int Lines = (int)strlen(NewString) / MAX_LINE_LENGTH + 1;
+	int stringLength = (int)strlen(NewString);
+	int Lines = stringLength / MAX_LINE_LENGTH + 1;
+	if (((Lines - 1) * MAX_LINE_LENGTH) == stringLength) Lines -= 1;
 
 	// Move all existing lines upward the number of line being added
 	for (int i = Lines; i < DIALOGUE_LINES; i += 1)
@@ -185,56 +193,44 @@ void Chat::DisplayLines(void)
 
 void Chat::CheckInput(void)
 {
+	if (GetConsoleWindow() != GetForegroundWindow()) return;
+
 	// If the client detects the ENTER/RETURN key, send the current line
 	if (KEY_DOWN(VK_RETURN))
 	{
-		if (NoRepeat[26] == false)
-		{
-			SendChatString(InputLine);
-			InputLine[0] = 0;
-			NoRepeat[26] = true;
-		}
+		SendChatString(InputLine);
+		InputLine[0] = 0;
 	}
-	else NoRepeat[26] = false;
 
 	// If the client detects the BACKSPACE key, go back one character
 	if (KEY_DOWN(VK_BACK))
 	{
-		if (NoRepeat[27] == false)
+		if (NoRepeat[ACCEPTED_CHARACTERS] == false)
 		{
 			int i = 0;
 			for (i = 0; InputLine[i] != 0; i += 1) {}
 			if (i != 0) InputLine[i - 1] = 0;
-			NoRepeat[27] = true;
+			NoRepeat[ACCEPTED_CHARACTERS] = true;
 			NoDrawNeeded[1] = false;
 		}
 	}
-	else NoRepeat[27] = false;
+	else NoRepeat[ACCEPTED_CHARACTERS] = false;
 
 	int PressedKey = 0;
 
 	// If the client detects a letter, place it into the current input string
-	for (int i = 'A'; i < 'A' + 26; i += 1)
+	for (int i = FIRST_CHARACTER; i < LAST_CHARACTER + 1; i += 1)
 	{
 		if (KEY_DOWN(i))
 		{
-			if (NoRepeat[i - 'A'] == false)
+			if (NoRepeat[i - FIRST_CHARACTER] == false)
 			{
 				PressedKey = i;
-				NoRepeat[i - 'A'] = true;
+				NoRepeat[i - FIRST_CHARACTER] = true;
 			}
 		}
-		else NoRepeat[i - 'A'] = false;
+		else NoRepeat[i - FIRST_CHARACTER] = false;
 	}
-
-	// If the client detects the spacebar, add a space to the current string (overwrites any letter input)
-	if (KEY_DOWN(VK_SPACE))
-	{
-		if (NoRepeat[28] == false)
-			PressedKey = ' ';
-		NoRepeat[28] = true;
-	}
-	else NoRepeat[28] = false;
 
 	if (PressedKey)
 	{
@@ -247,7 +243,7 @@ void Chat::CheckInput(void)
 
 			InputLine[j] = PressedKey;
 			InputLine[j + 1] = 0;
-			NoRepeat[PressedKey - 'A'] = true;
+			NoRepeat[PressedKey] = true;
 			NoDrawNeeded[1] = false;
 		}
 	}
@@ -273,18 +269,20 @@ void Chat::SendChatString(char* String)
 {
 	if (strlen(String) == 0) return;
 
-	char NewString[100];
-
-	int S = (int)strlen(Name) + 2;
-	for (int i = 0; Name[i] != 0; i += 1)		NewString[i] = Name[i];
-	NewString[S - 2] = ':';
-	NewString[S - 1] = ' ';
-	for (int i = S; String[i - S] != 0; i += 1)	NewString[i] = String[i - S];
-	S += (int)strlen(String);
-	NewString[S] = 0;
-
 	winsockWrapper.ClearBuffer(0);
 	winsockWrapper.WriteChar(2, 0);
-	winsockWrapper.WriteString(NewString, 0);
+
+	//  Form the full string with the users name
+	std::string sendString;
+	sendString += Name;
+	sendString += ": ";
+	sendString += String;
+
+	//  Encrypt the string using Groundfish
+	unsigned char encrypted[256];
+	int messageSize = Groundfish::Encrypt(sendString.c_str(), encrypted, int(sendString.length()) + 1, 0, rand() % 256);
+
+	winsockWrapper.WriteInt(messageSize, 0);
+	winsockWrapper.WriteChars(encrypted, messageSize, 0);
 	winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
 }

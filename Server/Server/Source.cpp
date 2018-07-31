@@ -9,7 +9,7 @@ bool TestGroundfish(unsigned char wordListIndex)
 	const char* testMessage = "This is a test of the Groundfish encryption system.";
 	unsigned char EncryptedMessage[128];
 	char DecryptedMessage[128];
-	unsigned int messageLength = strlen(testMessage) + 1;
+	unsigned int messageLength = int(strlen(testMessage)) + 1;
 	Groundfish::Encrypt(testMessage, (unsigned char*)EncryptedMessage, messageLength, 0, wordListIndex);
 	Groundfish::Decrypt((unsigned char*)EncryptedMessage, (char*)DecryptedMessage);
 	return (strcmp(testMessage, DecryptedMessage) == 0);

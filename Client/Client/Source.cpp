@@ -1,5 +1,7 @@
 #include "Groundfish.h"
-#include "Chat.h"
+#include "GroundfishChat.h"
+
+#define CHAT_SERVER_IP	"groundfishchat.zapto.org"
 
 int main(void)
 {
@@ -10,7 +12,7 @@ int main(void)
 	winsockWrapper.WinsockInitialize();
 
 	Chat CHAT;
-	if (CHAT.Initialize("127.0.0.1"))
+	if (CHAT.Initialize(CHAT_SERVER_IP))
 	{
 		//	Step 2: EXECUTION
 		while (!KEY_DOWN(VK_F3))

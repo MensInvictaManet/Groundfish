@@ -20,7 +20,7 @@ namespace Groundfish
 	GroundfishWordlist CurrentWordList;
 	unsigned int CurrentVersion = 0;
 
-	void Encrypt(const char* data, unsigned char* encrypted, const int dataLength, const int wordListVersion = 0, unsigned char wordIndex = 0)
+	int Encrypt(const char* data, unsigned char* encrypted, const int dataLength, const int wordListVersion = 0, unsigned char wordIndex = 0)
 	{
 		GroundfishWordlist& wordList = (wordListVersion == 0) ? CurrentWordList : CurrentWordList; // TODO: Update this to grab old versions
 		unsigned int encryptionIndex = 0;
@@ -38,6 +38,8 @@ namespace Groundfish
 
 		for (int i = 0; i < dataLength; ++i)
 			encrypted[encryptionIndex + i] = wordList.WordList[wordIndex++][(unsigned char)data[i]];
+
+		return encryptionIndex + dataLength;
 	}
 
 	void Decrypt(const unsigned char* encrypted, char* decrypted)

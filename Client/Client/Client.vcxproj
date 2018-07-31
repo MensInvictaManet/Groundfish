@@ -118,7 +118,7 @@
     <ClCompile Include="Source.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Chat.h" />
+    <ClInclude Include="GroundfishChat.h" />
     <ClInclude Include="Groundfish.h" />
     <ClInclude Include="SimpleMD5.h" />
     <ClInclude Include="Socket.h" />
