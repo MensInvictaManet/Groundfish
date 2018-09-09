@@ -15,9 +15,8 @@ using namespace std;
 #define SERVER_IP_LENGTH	128
 #define USER_NAME_LENGTH	32
 
-#define FIRST_CHARACTER		32		//  SPACEBAR
-#define LAST_CHARACTER		126		//  TILDE (~)
-#define ACCEPTED_CHARACTERS	(LAST_CHARACTER - FIRST_CHARACTER + 1)
+#define CHARACTER_HOLD_TIMER		150
+#define CHARACTER_SHORT_HOLD_TIMER	75
 
 class Chat
 {
@@ -30,20 +29,21 @@ private:
 	bool		NoDrawNeeded[2];
 	char		InputLine[MAX_LINE_LENGTH];
 
-	char		NoRepeat[ACCEPTED_CHARACTERS + 1]; //  Adding 1 because of the backspace repeat removal
+	std::unordered_map<int, long> NoRepeat;
 
 public:
 	Chat(void) {}
 	~Chat(void) {}
 
 	bool Initialize(const char* IP);
-	bool MainProcess(void);
+	bool MainProcess(long ticks);
 	void Shutdown(void);
 
 	bool ReadMessages(void);
 	void NewLine(char* NewString);
 	void DisplayLines(void);
-	void CheckInput(void);
+	char GetVKStateCharacter(void);
+	void CheckInput(long ticks);
 	void SendChatString(char* String);
 
 	void DrawOutline(void);
@@ -76,18 +76,16 @@ bool Chat::Initialize(const char* IP)
 	for (int i = 0; i < MAX_LINE_LENGTH; i += 1) InputLine[i] = 0;
 	NoDrawNeeded[0] = false;
 
-	for (int i = 0; i < ACCEPTED_CHARACTERS; i += 1) NoRepeat[i] = false;
-
 	DrawOutline();
 
 	return true;
 }
 
-bool Chat::MainProcess(void)
+bool Chat::MainProcess(long ticks)
 {
 	ReadMessages();
 	DisplayLines();
-	CheckInput();
+	CheckInput(ticks);
 	return true;
 }
 
@@ -191,61 +189,83 @@ void Chat::DisplayLines(void)
 	}
 }
 
-void Chat::CheckInput(void)
+char Chat::GetVKStateCharacter()
+{
+	//  Check for RETURN and BACK
+	if (KEY_DOWN(VK_RETURN))	return VK_RETURN;
+	if (KEY_DOWN(VK_BACK))		return VK_BACK;
+
+	//  Check for (uppercase) letters
+	for (int i = 'A'; i <= 'Z'; ++i) if (KEY_DOWN(i)) return i;
+
+	//  Check for numbers
+	for (int i = '0'; i <= '9'; ++i) if (KEY_DOWN(i)) return i;
+
+	//  Check for other characters
+	if (KEY_DOWN(VK_SPACE)) return ' ';
+	if (KEY_DOWN(VK_OEM_PERIOD)) return '.';
+	if (KEY_DOWN(VK_OEM_MINUS)) return '-';
+	if (KEY_DOWN(VK_OEM_PLUS)) return '+';
+
+	return 0;
+}
+
+void Chat::CheckInput(long ticks)
 {
 	if (GetConsoleWindow() != GetForegroundWindow()) return;
 
+	for (std::unordered_map<int, long>::iterator iter = NoRepeat.begin(); iter != NoRepeat.end(); ++iter)
+		(*iter).second = ((*iter).second < ticks) ? 0 : ((*iter).second - ticks);
+
+	// If the client detects a character, save it off to use in the string or as a command
+	int PressedKey = GetVKStateCharacter();
+	int PressedKeyUpper = PressedKey;
+	if (PressedKey == 0) return;
+	if ((NoRepeat.find(PressedKey) != NoRepeat.end()) && (NoRepeat[PressedKey] != 0)) return;
+
 	// If the client detects the ENTER/RETURN key, send the current line
-	if (KEY_DOWN(VK_RETURN))
+	if (PressedKey == VK_RETURN)
 	{
 		SendChatString(InputLine);
 		InputLine[0] = 0;
+		NoRepeat[PressedKey] = CHARACTER_SHORT_HOLD_TIMER;
+		return;
 	}
 
 	// If the client detects the BACKSPACE key, go back one character
-	if (KEY_DOWN(VK_BACK))
+	if (PressedKey == VK_BACK)
 	{
-		if (NoRepeat[ACCEPTED_CHARACTERS] == false)
-		{
-			int i = 0;
-			for (i = 0; InputLine[i] != 0; i += 1) {}
-			if (i != 0) InputLine[i - 1] = 0;
-			NoRepeat[ACCEPTED_CHARACTERS] = true;
-			NoDrawNeeded[1] = false;
-		}
-	}
-	else NoRepeat[ACCEPTED_CHARACTERS] = false;
-
-	int PressedKey = 0;
-
-	// If the client detects a letter, place it into the current input string
-	for (int i = FIRST_CHARACTER; i < LAST_CHARACTER + 1; i += 1)
-	{
-		if (KEY_DOWN(i))
-		{
-			if (NoRepeat[i - FIRST_CHARACTER] == false)
-			{
-				PressedKey = i;
-				NoRepeat[i - FIRST_CHARACTER] = true;
-			}
-		}
-		else NoRepeat[i - FIRST_CHARACTER] = false;
+		int i = 0;
+		for (i = 0; InputLine[i] != 0; i += 1) {}
+		if (i != 0) InputLine[i - 1] = 0;
+		NoDrawNeeded[1] = false;
+		NoRepeat[PressedKey] = CHARACTER_SHORT_HOLD_TIMER;
+		return;
 	}
 
-	if (PressedKey)
+	//  If we're checking a letter, check for shift and take uppercase situations into mind
+	if ((PressedKey >= 'A') && (PressedKey <= 'Z'))
 	{
-		unsigned int j;
-		for (j = 0; ((InputLine[j] != 0) && (j < MAX_LINE_LENGTH - strlen(Name) - 2)); j += 1) {}
-		if (j < (MAX_LINE_LENGTH - strlen(Name) - 2))
-		{
-			if (((PressedKey >= 'A') && (PressedKey <= 'Z')) || ((PressedKey >= 'a') && (PressedKey <= 'z')))
-				PressedKey += ((KEY_DOWN(VK_SHIFT)) ? 0 : 32);
+		PressedKeyUpper = PressedKey;
+		PressedKey += ((KEY_DOWN(VK_SHIFT)) ? 0 : ('a' - 'A'));
+		if ((NoRepeat.find(PressedKey) != NoRepeat.end()) && (NoRepeat[PressedKey] != 0)) return;
+	}
 
-			InputLine[j] = PressedKey;
-			InputLine[j + 1] = 0;
-			NoRepeat[PressedKey] = true;
-			NoDrawNeeded[1] = false;
-		}
+	for (std::unordered_map<int, long>::iterator iter = NoRepeat.begin(); iter != NoRepeat.end(); ++iter)
+	{
+		if ((*iter).first == PressedKey) continue;
+		if ((*iter).first == PressedKeyUpper) continue;
+		(*iter).second = 0;
+	}
+
+	unsigned int i;
+	for (i = 0; ((InputLine[i] != 0) && (i < MAX_LINE_LENGTH - strlen(Name) - 2)); ++i) {}
+	if (i < (MAX_LINE_LENGTH - strlen(Name) - 2))
+	{
+		InputLine[i] = PressedKey;
+		InputLine[i + 1] = 0;
+		NoRepeat[PressedKey] = CHARACTER_HOLD_TIMER;
+		NoDrawNeeded[1] = false;
 	}
 }
 
