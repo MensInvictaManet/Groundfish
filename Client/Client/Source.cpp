@@ -2,8 +2,6 @@
 #include "GroundfishChat.h"
 #include <time.h>
 
-#define CHAT_SERVER_IP	"127.0.0.1"
-
 clock_t Timer;
 clock_t Ticks;
 
@@ -16,7 +14,7 @@ int main(void)
 	winsockWrapper.WinsockInitialize();
 
 	Chat CHAT;
-	if (CHAT.Initialize(CHAT_SERVER_IP))
+	if (CHAT.Initialize())
 	{
 		//	Step 2: EXECUTION
 		while (!KEY_DOWN(VK_F3))

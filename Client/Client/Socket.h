@@ -52,12 +52,12 @@ inline bool Socket::tcpconnect(const char *address, int port, int mode)
 	char portString[16];
 	sprintf_s(portString, 16, "%d", port);
 
-	if ((m_SocketID = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == SOCKET_ERROR) return false;
+	if ((m_SocketID = socket(AF_INET, SOCK_STREAM, IPPROTO_HOPOPTS)) == SOCKET_ERROR) return false;
 
 	struct addrinfo hints, *servinfo;
 
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC; // use AF_INET6 to force IPv6
+	hints.ai_family = AF_INET; // use AF_INET6 to force IPv6
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_protocol = IPPROTO_TCP;
 

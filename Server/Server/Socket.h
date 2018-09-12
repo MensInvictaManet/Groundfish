@@ -86,7 +86,7 @@ inline bool Socket::tcpconnect(const char *address, int port, int mode)
 
 inline bool Socket::tcplisten(int port, int max, int mode)
 {
-	if ((m_SocketID = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == INVALID_SOCKET) return false;
+	if ((m_SocketID = socket(AF_INET, SOCK_STREAM, IPPROTO_HOPOPTS)) == INVALID_SOCKET) return false;
 	SOCKADDR_IN addr;
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = INADDR_ANY;

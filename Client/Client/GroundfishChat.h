@@ -7,6 +7,7 @@ using namespace std;
 
 #define KEY_DOWN(vk_code) ((GetAsyncKeyState(vk_code) & 0x8000) ? 1 : 0)
 
+#define CHAT_SERVER_IP	"98.181.188.165"
 #define SERVER_PORT	2347
 
 #define DIALOGUE_LINES		21
@@ -15,12 +16,74 @@ using namespace std;
 #define SERVER_IP_LENGTH	128
 #define USER_NAME_LENGTH	32
 
-#define CHARACTER_HOLD_TIMER		150
+#define CHARACTER_HOLD_TIMER		200
 #define CHARACTER_SHORT_HOLD_TIMER	75
+
+#define FILE_PORTION_SIZE 1024
 
 class Chat
 {
 private:
+	struct FileReceiveTask
+	{
+		FileReceiveTask(const char* fileName, int fileSize, int socketID, std::string ipAddress) :
+			FileName(fileName),
+			FileSize(fileSize),
+			SocketID(socketID),
+			IPAddress(ipAddress)
+		{
+			FilePortionCount = FileSize / FILE_PORTION_SIZE;
+			if ((FileSize % FILE_PORTION_SIZE) != 0) FilePortionCount += 1;
+
+			for (int i = 0; i < FilePortionCount; ++i) FilePortionsSent.push_back(i);
+			FileStream.open(FileName.c_str(), std::ios_base::binary | std::ios_base::out | std::ios_base::in);
+			assert(FileStream.good() && !FileStream.bad());
+		}
+
+		bool ReceiveFile(std::string& progress)
+		{
+			/*
+			//  Decrypt using Groundfish and save as the filename
+			int fileNameSize = winsockWrapper.ReadInt(0);
+			unsigned char encryptedFileName[256];
+			memcpy(encryptedFileName, winsockWrapper.ReadChars(0, fileNameSize), fileNameSize);
+			char decryptedFileName[256];
+			Groundfish::Decrypt(encryptedFileName, decryptedFileName);
+			*/
+
+			int portionPosition = winsockWrapper.ReadInt(0);
+			int portionSize = winsockWrapper.ReadInt(0);
+
+			unsigned char* portion = winsockWrapper.ReadChars(0, portionSize);
+			FileStream.write((char*)portion, portionSize);
+			if (int(FileStream.tellp()) == FileSize)
+			{
+				FileStream.close();
+				progress = "File Download COMPLETE";
+				return true;
+			}
+
+			progress = "Downloaded Portion [" + std::to_string(portionPosition) + " to " + std::to_string(portionPosition + portionSize - 1) + "]";
+
+			int filePointer = winsockWrapper.ReadInt(0);
+			winsockWrapper.ClearBuffer(0);
+			winsockWrapper.WriteChar(4, 0);
+			winsockWrapper.WriteInt(filePointer, 0);
+			winsockWrapper.SendMessagePacket(SocketID, IPAddress.c_str() , SERVER_PORT, 0);
+
+			return false;
+		}
+
+		std::string FileName;
+		int FileSize;
+		int SocketID;
+		std::string IPAddress;
+
+		int FilePortionCount;
+		std::list<int> FilePortionsSent;
+		std::ofstream FileStream;
+	};
+
 	int			ServerSocket;
 	char		ServerIP[SERVER_IP_LENGTH];
 
@@ -30,17 +93,18 @@ private:
 	char		InputLine[MAX_LINE_LENGTH];
 
 	std::unordered_map<int, long> NoRepeat;
+	FileReceiveTask* fileReceiveTask = NULL;
 
 public:
 	Chat(void) {}
 	~Chat(void) {}
 
-	bool Initialize(const char* IP);
+	bool Initialize();
 	bool MainProcess(long ticks);
 	void Shutdown(void);
 
 	bool ReadMessages(void);
-	void NewLine(char* NewString);
+	void NewLine(const char* NewString);
 	void DisplayLines(void);
 	char GetVKStateCharacter(void);
 	void CheckInput(long ticks);
@@ -49,9 +113,9 @@ public:
 	void DrawOutline(void);
 };
 
-bool Chat::Initialize(const char* IP)
+bool Chat::Initialize()
 {
-	strcpy_s(ServerIP, SERVER_IP_LENGTH, IP);
+	strcpy_s(ServerIP, SERVER_IP_LENGTH, CHAT_SERVER_IP);
 
 	// Connect to the given server
 	ServerSocket = winsockWrapper.TCPConnect(ServerIP, SERVER_PORT, 1);
@@ -104,30 +168,71 @@ bool Chat::ReadMessages(void)
 
 	switch (MessageID)
 	{
-	case 1:
-		winsockWrapper.ClearBuffer(0);
-		winsockWrapper.WriteChar(1, 0);
-		winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
+		case 1: //  Ping request, send back a ping return
+			winsockWrapper.ClearBuffer(0);
+			winsockWrapper.WriteChar(1, 0);
+			winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
+			break;
+
+		case 2: //  Chat message, decrypt it and post to the screen
+		{
+			int messageSize = winsockWrapper.ReadInt(0);
+
+			//  Decrypt using Groundfish and post to the chat
+			unsigned char encrypted[256];
+			memcpy(encrypted, winsockWrapper.ReadChars(0, messageSize), messageSize);
+			char decrypted[256];
+			Groundfish::Decrypt(encrypted, decrypted);
+			NewLine(decrypted);
+			break;
+		}
+
+		case 3: //  File send initialization, decrypt it and store off the file by size
+		{
+			int fileNameSize = winsockWrapper.ReadInt(0);
+
+			//  Decrypt using Groundfish and save as the filename
+			unsigned char encryptedFileName[256];
+			memcpy(encryptedFileName, winsockWrapper.ReadChars(0, fileNameSize), fileNameSize);
+			char decryptedFileName[256];
+			Groundfish::Decrypt(encryptedFileName, decryptedFileName);
+
+			//  Create a file of the proper size based on the server's description
+			int fileSize = winsockWrapper.ReadInt(0);
+			std::ofstream outputFile(decryptedFileName, std::ios::binary | std::ios::trunc | std::ios_base::beg);
+			outputFile.seekp(fileSize - 1);
+			outputFile.write("", 1);
+			outputFile.close();
+
+			//  Create a new file receive task
+			fileReceiveTask = new FileReceiveTask(decryptedFileName, fileSize, 0, CHAT_SERVER_IP);
+
+			//  Output the file name
+			std::string newString = "Downloading file: " + std::string(decryptedFileName) + " (size: " + std::to_string(fileSize) + ")";
+			NewLine(newString.c_str());
+			break;
+		}
+
+		case 4: //  File portion
+		{
+			if (fileReceiveTask != NULL)
+			{
+				std::string progressString = "ERROR";
+				if (fileReceiveTask->ReceiveFile(progressString))
+				{
+					delete fileReceiveTask;
+					fileReceiveTask = NULL;
+				}
+				NewLine(progressString.c_str());
+			}
+		}
 		break;
-	case 2:
-	{
-		int messageSize = winsockWrapper.ReadInt(0);
-
-		//  Decrypt using Groundfish
-		unsigned char encrypted[256];
-		memcpy(encrypted, winsockWrapper.ReadChars(0, messageSize), messageSize);
-		char decrypted[256];
-		Groundfish::Decrypt(encrypted, decrypted);
-
-		NewLine(decrypted);
-	}
-	break;
 	}
 
 	return true;
 }
 
-void Chat::NewLine(char* NewString)
+void Chat::NewLine(const char* NewString)
 {
 	int stringLength = (int)strlen(NewString);
 	int Lines = stringLength / MAX_LINE_LENGTH + 1;
@@ -204,6 +309,7 @@ char Chat::GetVKStateCharacter()
 	//  Check for other characters
 	if (KEY_DOWN(VK_SPACE)) return ' ';
 	if (KEY_DOWN(VK_OEM_PERIOD)) return '.';
+	if (KEY_DOWN(VK_OEM_COMMA)) return ',';
 	if (KEY_DOWN(VK_OEM_MINUS)) return '-';
 	if (KEY_DOWN(VK_OEM_PLUS)) return '+';
 
@@ -229,6 +335,7 @@ void Chat::CheckInput(long ticks)
 		SendChatString(InputLine);
 		InputLine[0] = 0;
 		NoRepeat[PressedKey] = CHARACTER_SHORT_HOLD_TIMER;
+		NoDrawNeeded[1] = false;
 		return;
 	}
 

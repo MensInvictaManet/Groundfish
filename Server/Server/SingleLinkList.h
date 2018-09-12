@@ -1,6 +1,8 @@
 #ifndef _SLLIST_H_
 #define _SLLIST_H_
 
+#include <cstring>
+
 template <typename Type>
 class SLList
 {
