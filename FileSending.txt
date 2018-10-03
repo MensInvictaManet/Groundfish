@@ -1,0 +1,38 @@
+File sending:
+
+01) The Client sends a "File Request" message, specifying the file desired
+02) The Server creates and holds a FileSendTask with the file name
+03) The FileSendTask opens the file, keeping the file handle open for reading.
+04) The FileSendTask reads the first 1MB of the file, or the entire file if it is less than 1MB. It stores the data in 1024 groups of 1024 bytes, or less.
+05) The FileSendTask tells the client in a "File Send Initializer" message what it is sending, as well as the file size, and the size of the chunks (we assume 1024 bytes).
+06) The Client, upon receiving that message, creates and holds a FileReceiveTask with the file name, file size, and chunk size
+07) The FileReceiveTask creates an empty file of that size, creates the data buffer of 1024 bytes as well as a map of 1024 bools, and informs the server it is ready with a "File Receive Ready" message
+08) The FileSendTask, upon receiving the ready signal, sends 1MB of the file in chunks, with the data index (chunk number), the data position (chunk number times chunk size) and the size (in case it is a smaller chunk)
+09) The FileReceiveTask, upon receiving each message, removes the indexed bool from the map, fills the buffer, and writes it to the file, building it as they go.
+10) The FileSendTask, after sending all of the data, sends a "Portion Complete" message, indicating that the portion is finished. It waits for a "Portion Part Request" or "Portion Received" message, pinging intermitently
+11) The FileReceiveTask, upon receiving the "Portion Complete" message, sends a "Portion Part Request" for any portions it missed due to network traffic overload, or sends "Portion Received" if it received them all
+12) The FileSendTask loads in the next 1MB and continues the process
+13) The FileReceiveTask, upon getting the entire file, sends the last "Portion Received" message, at which point it shuts down and closes the file handle
+14) The FileSendTask, upon receiving the last "Portion Received" message, shuts down and closes the file handle
+
+NOTES:
+- Message IDs:
+	- "File Request" (Client to Server): ID 4
+		- ?-sized string of file name
+	- "File Send Initializer" (Server to Client): ID 3
+		- ?-sized string of name (encrypted)
+		- 4-byte int of file size
+		- 2-byte short of file chunk size
+	- "File Receive Ready" (Client to Server): ID 5
+		- ?-sized string of name (unencrypted) [encrypt later]
+	- "File Portion" (Server to Client): ID 4
+		- 4-byte int of chunkBufferIndex
+		- 4-byte int of chunkIndex
+		- 4-byte int of chunkSize [n]
+		- n-sized chars array of file data
+	- "File Portion Complete" (Server to Client): ID 5
+	- "File Portion Complete Confirm" (Client to Server): ID 6
+		- 4-byte int of portion index
+	- "File Chunks Remaining" (Client to Server): ID 7
+		- 4-byte int of chunkCount
+		- n-sized array of 2-byte shorts for each chunk index

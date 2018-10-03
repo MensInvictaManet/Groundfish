@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-#define RETURNVAL_BUFFER_SIZE 1024 * 128
+#define RETURNVAL_BUFFER_SIZE 1024 * 128 // 128KB
 
 class SocketBuffer
 {

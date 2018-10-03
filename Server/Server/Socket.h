@@ -247,7 +247,8 @@ inline int Socket::receivetext(char*buf, int max)
 	}
 	return -1;
 }
-inline int Socket::receivemessage(int len, SocketBuffer*destination, int length_specific)
+
+inline int Socket::receivemessage(int len, SocketBuffer* destination, int length_specific)
 {
 	if (m_SocketID < 0) return -1;
 	auto size = -1;
@@ -262,15 +263,17 @@ inline int Socket::receivemessage(int len, SocketBuffer*destination, int length_
 	{
 		if (m_DataFormat == 0 && !len)
 		{
-			unsigned short length;
 			if (length_specific == 0)
 			{
-				if ((size = recv(m_SocketID, (char*)&length, 2, 0)) == SOCKET_ERROR) { return -1; }
+				//  Check that 2 bytes have been received, noting the length of the incoming message. Peek the data in case it hasn't fully arrived.
+				if ((size = recv(m_SocketID, (char*)&length_specific, 2, MSG_PEEK)) == SOCKET_ERROR) { return -1; }
 				if (size == 0) { return 0; }
 			}
-			auto buffer_size = length_specific != 0 ? length_specific : length;
-			buff = new char[buffer_size];
-			size = recv(m_SocketID, buff, buffer_size, 0);
+
+			auto buffer_size = length_specific;
+			buff = new char[buffer_size + 2];
+			if ((size = recv(m_SocketID, buff, buffer_size, MSG_PEEK)) == SOCKET_ERROR) { return -1; } // It is possible that the full data hasn't arrived yet, so peek first
+			size = recv(m_SocketID, buff, buffer_size + 2, 0);
 		}
 		else if (m_DataFormat == 1 && !len)
 		{
@@ -287,7 +290,7 @@ inline int Socket::receivemessage(int len, SocketBuffer*destination, int length_
 	if (size > 0)
 	{
 		destination->clear();
-		destination->addBuffer(buff, size);
+		destination->addBuffer(buff + 2, size);
 	}
 	if (buff != nullptr)
 	{

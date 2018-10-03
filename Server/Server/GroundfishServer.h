@@ -4,86 +4,213 @@
 #include "WinsockWrapper.h"
 #include "Groundfish.h"
 
-#define SERVER_PORT				2347
-#define FILE_PORTION_SIZE		1024
-#define MAXIMUM_PACKET_COUNT	10
+#include <ctime>
+
+#define SERVER_PORT						2347
+#define FILE_CHUNK_SIZE					1024
+#define FILE_CHUNK_BUFFER_COUNT			500
+#define FILE_SEND_BUFFER_SIZE			(FILE_CHUNK_SIZE * FILE_CHUNK_BUFFER_COUNT)
+#define MAXIMUM_PACKET_COUNT			10
+#define PORTION_COMPLETE_REMIND_TIME	0.5
+
+enum MessageIDs
+{
+	MESSAGE_ID_PING_RETURN						= 1,
+	MESSAGE_ID_ENCRYPTED_CHAT_STRING			= 2,
+	MESSAGE_ID_UNENCRYPTED_PLAYER_NAME			= 3,
+	MESSAGE_ID_FILE_REQUEST						= 4,
+	MESSAGE_ID_FILE_RECEIVE_READY				= 5,
+	MESSAGE_ID_FILE_PORTION_COMPLETE_CONFIRM	= 6,
+	MESSAGE_ID_FILE_CHUNKS_REMAINING			= 7,
+};
+
+void SendMessage_FileSendInitializer(std::string fileName, int fileSize, int socket, const char* ip)
+{
+	//  Encrypt the file name string using Groundfish
+	unsigned char encrypted[256];
+	int messageSize = Groundfish::Encrypt(fileName.c_str(), encrypted, int(fileName.length()) + 1, 0, rand() % 256);
+
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(3, 0);
+	winsockWrapper.WriteInt(messageSize, 0);
+	winsockWrapper.WriteChars(encrypted, messageSize, 0);
+	winsockWrapper.WriteInt(fileSize, 0);
+	winsockWrapper.WriteInt(FILE_CHUNK_SIZE, 0);
+	winsockWrapper.WriteInt(FILE_CHUNK_BUFFER_COUNT, 0);
+
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
+
+void SendMessage_FileSendChunk(int chunkBufferIndex, int chunkIndex, int chunkSize, unsigned char* buffer, int socket, const char* ip)
+{
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(4, 0);
+	winsockWrapper.WriteInt(chunkBufferIndex, 0);
+	winsockWrapper.WriteInt(chunkIndex, 0);
+	winsockWrapper.WriteInt(chunkSize, 0);
+	winsockWrapper.WriteChars(buffer, chunkSize, 0);
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
+
+void SendMessage_FileTransferPortionComplete(int portionIndex, int socket, const char* ip)
+{
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(5, 0);
+	winsockWrapper.WriteInt(portionIndex, 0);
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
 
 class Server
 {
 private:
 	struct FileSendTask
 	{
-		FileSendTask(std::string& fileName, int fileSize, int socketID, std::string ipAddress) :
+		FileSendTask(std::string fileName, int socketID, std::string ipAddress) :
 			FileName(fileName),
-			FileSize(fileSize),
 			SocketID(socketID),
-			IPAddress(ipAddress)
+			IPAddress(ipAddress),
+			FileTransferReady(false),
+			FileChunkTransferState(CHUNK_STATE_INITIALIZING),
+			FilePortionIndex(0),
+			LastMessageTime(clock())
 		{
-			FilePortionCount = FileSize / FILE_PORTION_SIZE;
-			if ((FileSize % FILE_PORTION_SIZE) != 0) FilePortionCount += 1;
-
-			for (int i = 0; i < FilePortionCount; ++i) FilePortionsSent.push_back(i);
+			//  Open the file, determine that the file handler is good or not, then save off the chunk send indicator map
 			FileStream.open(FileName.c_str(), std::ios_base::binary);
 			assert(FileStream.good() && !FileStream.bad());
+
+			//  Get the file size by reading the beginning and end memory positions
+			FileSize = int(FileStream.tellg());
+			FileStream.seekg(0, std::ios::end);
+			FileSize = int(FileStream.tellg()) - FileSize;
+
+			//  Determine the file portion count
+			FileChunkCount = FileSize / FILE_CHUNK_SIZE;
+			if ((FileSize % FILE_CHUNK_SIZE) != 0) FileChunkCount += 1;
+
+			FilePortionCount = FileChunkCount / FILE_CHUNK_BUFFER_COUNT;
+			if ((FileChunkCount % FILE_CHUNK_BUFFER_COUNT) != 0) FilePortionCount += 1;
+
+			BufferFilePortions(FilePortionIndex, FILE_CHUNK_BUFFER_COUNT);
+
+			//  Send a "File Send Initializer" message
+			SendMessage_FileSendInitializer(FileName, FileSize, SocketID, IPAddress.c_str());
 		}
 
-		bool SendFile()
+		~FileSendTask()
 		{
-			if (FilePortionsSent.begin() == FilePortionsSent.end())
+			FileStream.close();
+		}
+
+		void BufferFilePortions(int chunkBufferIndex, int portionCount)
+		{
+			auto portionPosition = chunkBufferIndex * FILE_SEND_BUFFER_SIZE;
+			auto bytesBuffering = ((portionPosition + FILE_SEND_BUFFER_SIZE) > FileSize) ? (FileSize - portionPosition) : FILE_SEND_BUFFER_SIZE;
+			auto bufferCount = (((bytesBuffering % FILE_CHUNK_SIZE) == 0) ? (bytesBuffering / FILE_CHUNK_SIZE) : ((bytesBuffering / FILE_CHUNK_SIZE) + 1));
+
+			//  Empty the entire FilePortionBuffer
+			memset(FilePortionBuffer, NULL, FILE_SEND_BUFFER_SIZE);
+
+			//  Determine the amount of data we're actually buffering, if the file would end before reading the entire size
+
+			//  Go through each chunk of the file and place it in the file buffer until we either fill the buffer or run out of file
+			FileChunksToSend.clear();
+			for (auto i = 0; i < bufferCount; ++i)
 			{
-				FileStream.close();
-				return true;
+				auto chunkPosition = portionPosition + (i * FILE_CHUNK_SIZE);
+				FileStream.seekg(chunkPosition);
+
+				auto chunkFill = (((chunkPosition + FILE_CHUNK_SIZE) > FileSize) ? (FileSize - chunkPosition) : FILE_CHUNK_SIZE);
+				FileStream.read(FilePortionBuffer[i], chunkFill);
+
+				FileChunksToSend[i] = true;
+			}
+		}
+
+		bool SendFileChunk()
+		{
+			//  If we're pending completion, wait and send completion confirmation only if we've reached the end
+			if (FileChunkTransferState == CHUNK_STATE_PENDING_COMPLETE)
+			{
+				auto seconds = double(clock() - LastMessageTime) / CLOCKS_PER_SEC;
+				if (seconds > PORTION_COMPLETE_REMIND_TIME)
+				{
+					SendMessage_FileTransferPortionComplete(FilePortionIndex, SocketID, IPAddress.c_str());
+					LastMessageTime = clock();
+					return false;
+				}
+				return (FilePortionIndex >= FilePortionCount);
 			}
 
-			winsockWrapper.ClearBuffer(0);
-			winsockWrapper.WriteChar(4, 0);
+			//  First, check that we have data left unsent in the current chunk buffer. If not, set us to "Pending Complete" on the current chunk buffer
+			if (FileChunksToSend.begin() == FileChunksToSend.end())
+			{
+				FileChunkTransferState = CHUNK_STATE_PENDING_COMPLETE;
+				SendMessage_FileTransferPortionComplete(FilePortionIndex, SocketID, IPAddress.c_str());
+				LastMessageTime = clock();
+				return false;
+			}
 
-			/*
-			//  Encrypt the file name string using Groundfish
-			unsigned char encryptedFileName[256];
-			int fileNameMessageSize = Groundfish::Encrypt(FileName.c_str(), encryptedFileName, int(FileName.length()) + 1, 0, rand() % 256);
-
-			winsockWrapper.WriteInt(fileNameMessageSize, 0);
-			winsockWrapper.WriteChars(encryptedFileName, fileNameMessageSize, 0);
-			*/
 
 			//  Choose a portion of the file and commit it to a byte array
-			std::list<int>::iterator portionIter = FilePortionsSent.begin();
-			FileStream.seekg(FILE_PORTION_SIZE * (*portionIter));
-			int portionSize = (((FILE_PORTION_SIZE * (*portionIter)) + FILE_PORTION_SIZE) > FileSize) ? (FileSize - (FILE_PORTION_SIZE * (*portionIter))) : FILE_PORTION_SIZE;
-			FileStream.read(PortionArray, portionSize);
+			auto chunkIndex = (*FileChunksToSend.begin()).first;
+			auto chunkPosition = (FilePortionIndex * FILE_SEND_BUFFER_SIZE) + (FILE_CHUNK_SIZE * chunkIndex);
+			int chunkSize = ((chunkPosition + FILE_CHUNK_SIZE) > FileSize) ? (FileSize - chunkPosition) : FILE_CHUNK_SIZE;
 
-			winsockWrapper.WriteInt(FILE_PORTION_SIZE * (*portionIter), 0);
-			winsockWrapper.WriteInt(portionSize, 0);
-			FilePortionsSent.erase(portionIter);
+			//  Write the chunk buffer index, the index of the chunk, the size of the chunk, and then the chunk data
+			SendMessage_FileSendChunk(FilePortionIndex, chunkIndex, chunkSize, (unsigned char*)FilePortionBuffer[chunkIndex], SocketID, IPAddress.c_str());
+			SendCount += 1;
 
-			/*
-			//  Encrypt the file name string using Groundfish
-			unsigned char* encryptedPortion = new unsigned char[portionSize + 9];
-			int portionMessageSize = Groundfish::Encrypt(PortionArray, encryptedPortion, portionSize, 0, rand() % 256);
-			winsockWrapper.WriteInt(portionMessageSize, 0);
-			winsockWrapper.WriteChars(encryptedPortion, portionMessageSize, 0);
-			delete [] encryptedPortion;
-			*/
-
-			winsockWrapper.WriteChars((unsigned char*)PortionArray, portionSize, 0);
-
-			winsockWrapper.WriteInt(int(this), 0);
-
-			winsockWrapper.SendMessagePacket(SocketID, IPAddress.c_str(), SERVER_PORT, 0);
+			//  Delete the portionIter to signal we've completed sending it
+			FileChunksToSend.erase(chunkIndex);
 
 			return false;
 		}
+
+		void SetChunksRemaining(std::unordered_map<int, bool>& chunksRemaining)
+		{
+			FileChunksToSend.clear();
+			for (auto i = chunksRemaining.begin(); i != chunksRemaining.end(); ++i) FileChunksToSend[(*i).first] = true;
+			FileChunkTransferState = CHUNK_STATE_SENDING;
+		}
+
+		void FilePortionComplete(int portionIndex)
+		{
+			//  If this is just a duplicate message we're receiving, ignore it
+			if (FilePortionIndex > portionIndex) return;
+
+			//  If we've reached the end of the file, don't attempt to buffer anything, and leave the state PENDING COMPLETE
+			if (++FilePortionIndex >= FilePortionCount)  return;
+
+			BufferFilePortions(FilePortionIndex, FILE_CHUNK_BUFFER_COUNT);
+		}
+
+		inline bool GetFileTransferReady() const { return FileTransferReady; }
+		inline void SetFileTransferReady(bool ready) { FileTransferReady = ready; }
+		inline int GetFileTransferState() const { return FileChunkTransferState; }
+		inline void SetFileTransferState(int state) { FileChunkTransferState = (FileChunkSendState)state; }
 
 		std::string FileName;
 		int FileSize;
 		int SocketID;
 		std::string IPAddress;
-
-		int FilePortionCount;
-		std::list<int> FilePortionsSent;
 		std::ifstream FileStream;
-		char PortionArray[FILE_PORTION_SIZE];
+
+		enum FileChunkSendState
+		{
+			CHUNK_STATE_INITIALIZING		= 0,
+			CHUNK_STATE_SENDING				= 1,
+			CHUNK_STATE_PENDING_COMPLETE	= 2,
+			CHUNK_STATE_COMPLETE			= 3,
+		};
+
+		int FilePortionIndex;
+		bool FileTransferReady;
+		FileChunkSendState FileChunkTransferState;
+		int FilePortionCount;
+		int FileChunkCount;
+		std::unordered_map<int, bool> FileChunksToSend;
+		char FilePortionBuffer[FILE_CHUNK_BUFFER_COUNT][FILE_CHUNK_SIZE];
+		clock_t LastMessageTime;
 	};
 
 	int						ServerSocket;
@@ -91,7 +218,7 @@ private:
 	SLList<int>				C_Socket;
 	SLList<std::string>		C_IPAddr;
 	SLList<char>			C_PingCount;
-	std::unordered_map<FileSendTask*, int> FileSendTaskList;
+	std::unordered_map<int, FileSendTask*> FileSendTaskList; // NOTE: Key is the client ID, so we should limit them to one transfer in the future
 
 public:
 	int						Client_Count;
@@ -108,7 +235,7 @@ public:
 	void AcceptNewClients(void);
 	void Messages_Clients(void);
 
-	void SendFile(const char* filename, int clientID);
+	void BeginFileTransfer(const char* filename, int clientID);
 	void SendChatString(const char* String);
 
 	inline std::string	GetClientIP(int i) { return C_IPAddr[i]; }
@@ -143,15 +270,15 @@ bool Server::MainProcess(void)
 	Messages_Clients();
 
 	//  Send files
-	for (std::unordered_map<FileSendTask*, int>::iterator iter = FileSendTaskList.begin(); iter != FileSendTaskList.end(); ++iter)
+	for (auto iter = FileSendTaskList.begin(); iter != FileSendTaskList.end(); ++iter)
 	{
-		if ((*iter).second >= MAXIMUM_PACKET_COUNT) continue;
-		if (!(*iter).first->SendFile())
-		{
-			(*iter).second += 1;
-			continue;
-		}
+		//  If we aren't ready to send the file, continue out and wait for a ready signal
+		if ((*iter).second->GetFileTransferReady() == false) continue;
 
+		//  If we have data to send, send it and continue out so we can keep sending it until we're done
+		if (!(*iter).second->SendFileChunk()) continue;
+
+		delete (*iter).second;
 		FileSendTaskList.erase(iter);
 		break;
 	}
@@ -213,12 +340,19 @@ void Server::Messages_Clients(void)
 		char MessageID = winsockWrapper.ReadChar(0);
 		switch (MessageID)
 		{
-		case 1: //  Ping return
-			C_PingCount[i] = 0;
+		case MESSAGE_ID_PING_RETURN:
+			{
+				//  NO DATA
+
+				C_PingCount[i] = 0;
+			}
 			break;
 
-		case 2: // Chat message: Decrypt it, then send it out to all users (auto-encrypt)
+		case MESSAGE_ID_ENCRYPTED_CHAT_STRING:
 			{
+				//  (int) Message Size [N]
+				//  (N-sized char array) Encrypted String
+
 				int messageSize = winsockWrapper.ReadInt(0);
 
 				//  Decrypt using Groundfish
@@ -228,34 +362,69 @@ void Server::Messages_Clients(void)
 				Groundfish::Decrypt(encrypted, decrypted);
 
 				std::string decryptedString(decrypted);
-				if (decryptedString.find("download") != std::string::npos) SendFile("fileToTransfer.jpeg", i);
+				if (decryptedString.find("download") != std::string::npos) BeginFileTransfer("fileToTransfer.jpeg", i);
 				else SendChatString(decrypted);
 			}
 			break;
 
-		case 3: //  Player enters the server, sending their name to be broadcast
+		case MESSAGE_ID_UNENCRYPTED_PLAYER_NAME: // Player enters the server, sending their name to be broadcast
 			{
+				//  (?-size string) Unencrypted Player Name
+
 				char NewString[100];
 				char* Name = winsockWrapper.ReadString(0);
 				char* Extra = (char*)" has entered the server.";
 				int S = (int)strlen(Name);
-				for (int i = 0; Name[i] != 0; i += 1)		NewString[i] = Name[i];
-				for (int i = S; Extra[i - S] != 0; i += 1)	NewString[i] = Extra[i - S];
+				for (auto j = 0; Name[j] != 0; ++j)		NewString[j] = Name[j];
+				for (auto j = S; Extra[j - S] != 0; ++j)	NewString[j] = Extra[j - S];
 				S += (int)strlen(Extra);
 				NewString[S] = 0;
 				SendChatString(NewString);
 			}
 			break;
 
-		case 4: //  Player confirms receipt of file portion
+		case MESSAGE_ID_FILE_REQUEST:
 			{
-				int filePointer = winsockWrapper.ReadInt(0);
-				if (FileSendTaskList.find((FileSendTask*)filePointer) == FileSendTaskList.end()) return;
-				FileSendTaskList[(FileSendTask*)filePointer] -= 1;
+				char* fileName = winsockWrapper.ReadString(0);
+
+				BeginFileTransfer(fileName, i);
+			}
+		break;
+
+		case MESSAGE_ID_FILE_RECEIVE_READY:
+			{
+				char* fileName = winsockWrapper.ReadString(0);
+				auto iter = FileSendTaskList.find(i);
+				assert(iter != FileSendTaskList.end());
+
+				(*iter).second->SetFileTransferReady(true);
+				(*iter).second->SetFileTransferState(FileSendTask::CHUNK_STATE_SENDING);
+			}
+		break;
+
+		case MESSAGE_ID_FILE_PORTION_COMPLETE_CONFIRM:
+			{
+				auto task = FileSendTaskList.find(i);
+				assert(task != FileSendTaskList.end());
+				assert((*task).second->GetFileTransferState() == FileSendTask::CHUNK_STATE_PENDING_COMPLETE);
+
+				auto portionIndex = winsockWrapper.ReadInt(0);
+				(*task).second->FilePortionComplete(portionIndex);
+			}
+			break;
+		
+		case MESSAGE_ID_FILE_CHUNKS_REMAINING:
+			{
+				auto task = FileSendTaskList.find(i);
+				assert(task != FileSendTaskList.end());
+
+				auto chunkCount = winsockWrapper.ReadInt(0);
+				std::unordered_map<int, bool> chunksRemaining;
+				for (auto i = 0; i < chunkCount; ++i) chunksRemaining[winsockWrapper.ReadShort(0)] = true;
+				(*task).second->SetChunksRemaining(chunksRemaining);
 			}
 			break;
 		}
-
 	}
 }
 
@@ -263,31 +432,13 @@ void Server::Messages_Clients(void)
 //	Program Functionality
 ////////////////////////////////////////
 
-void Server::SendFile(const char* filename, int clientID)
+void Server::BeginFileTransfer(const char* filename, int clientID)
 {
-	std::ifstream inputFile(filename, std::ios_base::binary);
-	assert(inputFile.good() && !inputFile.bad());
+	SendCount = 0;
 
-	winsockWrapper.ClearBuffer(0);
-	winsockWrapper.WriteChar(3, 0);
-
-	//  Encrypt the file name string using Groundfish
-	unsigned char encrypted[256];
-	int messageSize = Groundfish::Encrypt(filename, encrypted, int(strlen(filename)) + 1, 0, rand() % 256);
-
-	winsockWrapper.WriteInt(messageSize, 0);
-	winsockWrapper.WriteChars(encrypted, messageSize, 0);
-
-	int fileSize = int(inputFile.tellg());
-	inputFile.seekg(0, std::ios::end);
-	fileSize = int(inputFile.tellg()) - fileSize;
-	winsockWrapper.WriteInt(fileSize, 0);
-
-	winsockWrapper.SendMessagePacket(C_Socket[clientID], C_IPAddr[clientID].c_str(), SERVER_PORT, 0);
-
-	std::string fileNameString(filename);
-	FileSendTask* newTask = new FileSendTask(fileNameString, fileSize, C_Socket[clientID], C_IPAddr[clientID]);
-	FileSendTaskList[newTask] = true;
+	//  Add a new FileSendTask to our list, so it can manage itself
+	FileSendTask* newTask = new FileSendTask(std::string(filename), C_Socket[clientID], std::string(C_IPAddr[clientID]));
+	FileSendTaskList[clientID] = newTask;
 }
 
 void Server::SendChatString(const char* String)

@@ -19,9 +19,9 @@ void Display_DEBUG(Server* SERVER)
 {
 	COORD C;
 
-	C.X = 3;	C.Y = 5;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
-	std::cout << "DEBUG DISPLAY: FIRST TEN CLIENTS";
-	C.X = 3;	C.Y = 6;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
+	C.X = 0;	C.Y = 0;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
+	std::cout << "DEBUG DISPLAY: FIRST TEN CLIENTS (" << SendCount << ")";
+	C.X = 0;	C.Y = 1;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 	std::cout << "================================";
 
 	int DebugCount = 10;
@@ -29,12 +29,12 @@ void Display_DEBUG(Server* SERVER)
 	{
 		if (i < SERVER->Client_Count)
 		{
-			C.X = 3;	C.Y = 7 + i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
+			C.X = 0;	C.Y = 2 + i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 			std::cout << "#" << i + 1 << ":  " << SERVER->GetClientIP(i) << "                    ";
 		}
 		else
 		{
-			C.X = 3;	C.Y = 7 + i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
+			C.X = 0;	C.Y = 2 + i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 			std::cout << "                                        ";
 		}
 	}

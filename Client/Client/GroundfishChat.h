@@ -4,13 +4,14 @@
 
 #include <iostream>
 using namespace std;
+#include <unordered_map>
 
 #define KEY_DOWN(vk_code) ((GetAsyncKeyState(vk_code) & 0x8000) ? 1 : 0)
 
 #define CHAT_SERVER_IP	"98.181.188.165"
 #define SERVER_PORT	2347
 
-#define DIALOGUE_LINES		21
+#define DIALOGUE_LINE_COUNT	21
 #define MAX_LINE_LENGTH		75
 
 #define SERVER_IP_LENGTH	128
@@ -19,76 +20,185 @@ using namespace std;
 #define CHARACTER_HOLD_TIMER		200
 #define CHARACTER_SHORT_HOLD_TIMER	75
 
-#define FILE_PORTION_SIZE 1024
+enum MessageIDs
+{
+	MESSAGE_ID_PING_REQUEST					= 1,
+	MESSAGE_ID_ENCRYPTED_CHAT_STRING		= 2,
+	MESSAGE_ID_FILE_SEND_INITIALIZER		= 3,
+	MESSAGE_ID_FILE_PORTION					= 4,
+	MESSAGE_ID_FILE_PORTION_COMPLETE		= 5,
+};
+
+
+void SendMessage_PlayerName(std::string playerName, int socket, char* ip)
+{
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(3, 0);
+	winsockWrapper.WriteString(playerName.c_str(), 0);
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
+
+void SendMessage_FileRequest(std::string fileName, int socket, const char* ip)
+{
+	//  Send a "File Request" message
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(4, 0);
+	winsockWrapper.WriteString(fileName.c_str(), 0);
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
+
+void SendMessage_FileReceiveReady(std::string fileName, int socket, const char* ip)
+{
+	//  Send a "File Receive Ready" message
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(5, 0);
+	//  TODO: Encrypt the file name
+	winsockWrapper.WriteString(fileName.c_str(), 0);
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
+
+void SendMessage_FilePortionCompleteConfirmation(int portionIndex, int socket, const char* ip)
+{
+	//  Send a "File Portion Complete" message
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(6, 0);
+	winsockWrapper.WriteInt(portionIndex, 0);
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
+
+void SendMessage_FileChunksRemaining(std::unordered_map<int, bool>& chunksRemaining, int socket, const char* ip)
+{
+	//  Send a "File Portion Complete" message
+	winsockWrapper.ClearBuffer(0);
+	winsockWrapper.WriteChar(7, 0);
+	winsockWrapper.WriteInt(chunksRemaining.size(), 0);
+	for (auto i = chunksRemaining.begin(); i != chunksRemaining.end(); ++i) winsockWrapper.WriteShort((short)((*i).first), 0);
+	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
+}
 
 class Chat
 {
 private:
 	struct FileReceiveTask
 	{
-		FileReceiveTask(const char* fileName, int fileSize, int socketID, std::string ipAddress) :
+		FileReceiveTask(const char* fileName, int fileSize, int fileChunkSize, int fileChunkBufferSize, int socketID, std::string ipAddress) :
 			FileName(fileName),
 			FileSize(fileSize),
+			FileChunkSize(fileChunkSize),
+			FileChunkBufferSize(fileChunkBufferSize),
 			SocketID(socketID),
-			IPAddress(ipAddress)
+			IPAddress(ipAddress),
+			FilePortionIndex(0),
+			FileDownloadComplete(false)
 		{
-			FilePortionCount = FileSize / FILE_PORTION_SIZE;
-			if ((FileSize % FILE_PORTION_SIZE) != 0) FilePortionCount += 1;
+			FileChunkCount = FileSize / FileChunkSize;
+			if ((FileSize % FileChunkSize) != 0) FileChunkCount += 1;
+			auto nextChunkCount = (FileChunkCount > (FileChunkBufferSize)) ? FileChunkBufferSize : FileChunkCount;
+			ResetChunksToReceiveMap(nextChunkCount);
+			FilePortionCount = FileChunkCount / FileChunkBufferSize;
+			if ((FileChunkCount % FileChunkBufferSize) != 0) FilePortionCount += 1;
 
-			for (int i = 0; i < FilePortionCount; ++i) FilePortionsSent.push_back(i);
+			//  Create a file of the proper size based on the server's description
+			std::ofstream outputFile(fileName, std::ios::binary | std::ios::trunc | std::ios_base::beg);
+			outputFile.seekp(fileSize - 1);
+			outputFile.write("", 1);
+			outputFile.close();
+
+			//  Open the file again, this time keeping the file handle open for later writing
 			FileStream.open(FileName.c_str(), std::ios_base::binary | std::ios_base::out | std::ios_base::in);
 			assert(FileStream.good() && !FileStream.bad());
+
+			FileReceiveBuffer = new char[FileChunkSize];
+			SendMessage_FileReceiveReady(FileName, SocketID, IPAddress.c_str());
 		}
+
+		~FileReceiveTask()
+		{
+			delete[] FileReceiveBuffer;
+		}
+
+		inline void ResetChunksToReceiveMap(int chunkCount) { FilePortionsToReceive.clear(); for (auto i = 0; i < chunkCount; ++i)  FilePortionsToReceive[i] = true; }
+		
 
 		bool ReceiveFile(std::string& progress)
 		{
-			/*
-			//  Decrypt using Groundfish and save as the filename
-			int fileNameSize = winsockWrapper.ReadInt(0);
-			unsigned char encryptedFileName[256];
-			memcpy(encryptedFileName, winsockWrapper.ReadChars(0, fileNameSize), fileNameSize);
-			char decryptedFileName[256];
-			Groundfish::Decrypt(encryptedFileName, decryptedFileName);
-			*/
+			auto filePortionIndex = winsockWrapper.ReadInt(0);
+			auto chunkIndex = winsockWrapper.ReadInt(0);
+			auto chunkSize = winsockWrapper.ReadInt(0);
+			unsigned char* chunkData = winsockWrapper.ReadChars(0, chunkSize);
 
-			int portionPosition = winsockWrapper.ReadInt(0);
-			int portionSize = winsockWrapper.ReadInt(0);
-
-			unsigned char* portion = winsockWrapper.ReadChars(0, portionSize);
-			FileStream.write((char*)portion, portionSize);
-			if (int(FileStream.tellp()) == FileSize)
+			if (filePortionIndex != FilePortionIndex)
 			{
-				FileStream.close();
-				progress = "File Download COMPLETE";
-				return true;
+				return false;
 			}
 
-			progress = "Downloaded Portion [" + std::to_string(portionPosition) + " to " + std::to_string(portionPosition + portionSize - 1) + "]";
+			if (FileDownloadComplete) return true;
 
-			int filePointer = winsockWrapper.ReadInt(0);
-			winsockWrapper.ClearBuffer(0);
-			winsockWrapper.WriteChar(4, 0);
-			winsockWrapper.WriteInt(filePointer, 0);
-			winsockWrapper.SendMessagePacket(SocketID, IPAddress.c_str() , SERVER_PORT, 0);
+			auto iter = FilePortionsToReceive.find(chunkIndex);
+			if (iter == FilePortionsToReceive.end()) return false;
+
+			auto chunkPosition = (filePortionIndex * FileChunkSize * FileChunkBufferSize) + (chunkIndex * FileChunkSize) + 0;
+			FileStream.seekp(chunkPosition);
+			FileStream.write((char*)chunkData, chunkSize);
+
+			progress = "Downloaded Portion [" + std::to_string(chunkPosition) + " to " + std::to_string(chunkPosition + chunkSize - 1) + "]";
+			assert(iter != FilePortionsToReceive.end());
+			FilePortionsToReceive.erase(iter);
 
 			return false;
 		}
+
+		bool CheckFilePortionComplete(int portionIndex)
+		{
+			if (portionIndex != FilePortionIndex) return false;
+
+			if (FilePortionsToReceive.size() != 0)
+			{
+				SendMessage_FileChunksRemaining(FilePortionsToReceive, SocketID, IPAddress.c_str());
+				return false;
+			}
+			else
+			{
+				SendMessage_FilePortionCompleteConfirmation(FilePortionIndex, SocketID, IPAddress.c_str());
+				if (++FilePortionIndex == FilePortionCount)
+				{
+					FileDownloadComplete = true;
+					FileStream.close();
+				}
+
+				//  Reset the chunk list to ensure we're waiting on the right number of chunks for the next portion
+				auto chunksProcessed = FilePortionIndex * FileChunkBufferSize;
+				auto nextChunkCount = (FileChunkCount > (chunksProcessed + FileChunkBufferSize)) ? FileChunkBufferSize : (FileChunkCount - chunksProcessed);
+				ResetChunksToReceiveMap(nextChunkCount);
+
+				return true;
+			}
+		}
+
+		inline bool GetFileDownloadComplete() const { return FileDownloadComplete; }
+		inline float GetPercentageComplete() const { return float(FilePortionIndex) / float(FilePortionCount) * 100.0f; }
 
 		std::string FileName;
 		int FileSize;
 		int SocketID;
 		std::string IPAddress;
-
 		int FilePortionCount;
-		std::list<int> FilePortionsSent;
+		int FileChunkCount;
+		const int FileChunkSize;
+		const int FileChunkBufferSize;
 		std::ofstream FileStream;
+
+		int FilePortionIndex;
+		char* FileReceiveBuffer;
+		std::unordered_map<int, bool> FilePortionsToReceive;
+		bool FileDownloadComplete;
 	};
 
 	int			ServerSocket;
 	char		ServerIP[SERVER_IP_LENGTH];
 
 	char		Name[USER_NAME_LENGTH];
-	char		Dialogue[DIALOGUE_LINES][MAX_LINE_LENGTH + 1];
+	char		Dialogue[DIALOGUE_LINE_COUNT][MAX_LINE_LENGTH + 1];
 	bool		NoDrawNeeded[2];
 	char		InputLine[MAX_LINE_LENGTH];
 
@@ -130,13 +240,13 @@ bool Chat::Initialize()
 	system("cls");
 
 	// Send name to the server
-	winsockWrapper.ClearBuffer(0);
-	winsockWrapper.WriteChar(3, 0);
-	winsockWrapper.WriteString(Name, 0);
-	winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
+	SendMessage_PlayerName(std::string(Name), ServerSocket, ServerIP);
+
+	//  Send file request to the server
+	SendMessage_FileRequest("fileToTransfer.jpeg", ServerSocket, ServerIP);
 
 	// Clear the dialogue
-	for (int i = 0; i < DIALOGUE_LINES; i += 1) Dialogue[i][0] = 0;
+	for (int i = 0; i < DIALOGUE_LINE_COUNT; i += 1) Dialogue[i][0] = 0;
 	for (int i = 0; i < MAX_LINE_LENGTH; i += 1) InputLine[i] = 0;
 	NoDrawNeeded[0] = false;
 
@@ -168,65 +278,85 @@ bool Chat::ReadMessages(void)
 
 	switch (MessageID)
 	{
-		case 1: //  Ping request, send back a ping return
-			winsockWrapper.ClearBuffer(0);
-			winsockWrapper.WriteChar(1, 0);
-			winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
-			break;
-
-		case 2: //  Chat message, decrypt it and post to the screen
-		{
-			int messageSize = winsockWrapper.ReadInt(0);
-
-			//  Decrypt using Groundfish and post to the chat
-			unsigned char encrypted[256];
-			memcpy(encrypted, winsockWrapper.ReadChars(0, messageSize), messageSize);
-			char decrypted[256];
-			Groundfish::Decrypt(encrypted, decrypted);
-			NewLine(decrypted);
-			break;
-		}
-
-		case 3: //  File send initialization, decrypt it and store off the file by size
-		{
-			int fileNameSize = winsockWrapper.ReadInt(0);
-
-			//  Decrypt using Groundfish and save as the filename
-			unsigned char encryptedFileName[256];
-			memcpy(encryptedFileName, winsockWrapper.ReadChars(0, fileNameSize), fileNameSize);
-			char decryptedFileName[256];
-			Groundfish::Decrypt(encryptedFileName, decryptedFileName);
-
-			//  Create a file of the proper size based on the server's description
-			int fileSize = winsockWrapper.ReadInt(0);
-			std::ofstream outputFile(decryptedFileName, std::ios::binary | std::ios::trunc | std::ios_base::beg);
-			outputFile.seekp(fileSize - 1);
-			outputFile.write("", 1);
-			outputFile.close();
-
-			//  Create a new file receive task
-			fileReceiveTask = new FileReceiveTask(decryptedFileName, fileSize, 0, CHAT_SERVER_IP);
-
-			//  Output the file name
-			std::string newString = "Downloading file: " + std::string(decryptedFileName) + " (size: " + std::to_string(fileSize) + ")";
-			NewLine(newString.c_str());
-			break;
-		}
-
-		case 4: //  File portion
-		{
-			if (fileReceiveTask != NULL)
+		case MESSAGE_ID_PING_REQUEST:
 			{
+				winsockWrapper.ClearBuffer(0);
+				winsockWrapper.WriteChar(1, 0);
+				winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
+			}
+			break;
+
+		case MESSAGE_ID_ENCRYPTED_CHAT_STRING:
+			{
+				int messageSize = winsockWrapper.ReadInt(0);
+
+				//  Decrypt using Groundfish and post to the chat
+				unsigned char encrypted[256];
+				memcpy(encrypted, winsockWrapper.ReadChars(0, messageSize), messageSize);
+				char decrypted[256];
+				Groundfish::Decrypt(encrypted, decrypted);
+				NewLine(decrypted);
+			}
+			break;
+
+
+		case MESSAGE_ID_FILE_SEND_INITIALIZER:
+			{
+				int fileNameSize = winsockWrapper.ReadInt(0);
+
+				//  Decrypt using Groundfish and save as the filename
+				unsigned char encryptedFileName[256];
+				memcpy(encryptedFileName, winsockWrapper.ReadChars(0, fileNameSize), fileNameSize);
+				char decryptedFileName[256];
+				Groundfish::Decrypt(encryptedFileName, decryptedFileName);
+
+				//  Grab the file size, file chunk size, and buffer count
+				auto fileSize = winsockWrapper.ReadInt(0);
+				auto fileChunkSize = winsockWrapper.ReadInt(0);
+				auto FileChunkBufferSize = winsockWrapper.ReadInt(0);
+
+				//  Create a new file receive task
+				fileReceiveTask = new FileReceiveTask(decryptedFileName, fileSize, fileChunkSize, FileChunkBufferSize, 0, CHAT_SERVER_IP);
+
+				//  Output the file name
+				std::string newString = "Downloading file: " + std::string(decryptedFileName) + " (size: " + std::to_string(fileSize) + ")";
+				NewLine(newString.c_str());
+			}
+			break;
+
+		case MESSAGE_ID_FILE_PORTION:
+			{
+				if (fileReceiveTask == NULL) break;
+
 				std::string progressString = "ERROR";
 				if (fileReceiveTask->ReceiveFile(progressString))
 				{
+					//  If ReceiveFile returns true, the transfer is complete
 					delete fileReceiveTask;
 					fileReceiveTask = NULL;
 				}
-				NewLine(progressString.c_str());
+				//NewLine(progressString.c_str());
 			}
-		}
-		break;
+			break;
+
+		case MESSAGE_ID_FILE_PORTION_COMPLETE:
+			{
+				auto portionIndex = winsockWrapper.ReadInt(0);
+				if (fileReceiveTask == nullptr) break;
+				if (fileReceiveTask->CheckFilePortionComplete(portionIndex))
+				{
+					auto percentComplete = "File Portion Complete: (" + std::to_string(fileReceiveTask->GetPercentageComplete()) + "%)";
+					NewLine(percentComplete.c_str());
+
+					if (fileReceiveTask->GetFileDownloadComplete())
+					{
+						delete fileReceiveTask;
+						fileReceiveTask = nullptr;
+						break;
+					}
+				}
+			}
+			break;
 	}
 
 	return true;
@@ -235,22 +365,22 @@ bool Chat::ReadMessages(void)
 void Chat::NewLine(const char* NewString)
 {
 	int stringLength = (int)strlen(NewString);
-	int Lines = stringLength / MAX_LINE_LENGTH + 1;
-	if (((Lines - 1) * MAX_LINE_LENGTH) == stringLength) Lines -= 1;
+	int linesAdded = stringLength / MAX_LINE_LENGTH + 1;
+	if (((linesAdded - 1) * MAX_LINE_LENGTH) == stringLength) linesAdded -= 1;
 
 	// Move all existing lines upward the number of line being added
-	for (int i = Lines; i < DIALOGUE_LINES; i += 1)
+	for (int i = linesAdded; i < DIALOGUE_LINE_COUNT; i += 1)
 	{
-		for (int j = 0; j < MAX_LINE_LENGTH; j += 1) Dialogue[i - Lines][j] = Dialogue[i][j];
-		Dialogue[i - Lines][MAX_LINE_LENGTH] = 0;
+		memmove(Dialogue[i - linesAdded], Dialogue[i], MAX_LINE_LENGTH);
+		Dialogue[i - linesAdded][MAX_LINE_LENGTH] = 0;
 	}
 
 	// Add the new lines
-	for (int i = 0; i < Lines; i += 1)
+	for (int i = 0; i < linesAdded; i += 1)
 	{
-		for (int j = 0; j < MAX_LINE_LENGTH; j += 1) Dialogue[DIALOGUE_LINES - 1 - i][j] = 0;
-		for (int j = 0; j < MAX_LINE_LENGTH; j += 1) Dialogue[DIALOGUE_LINES - 1 - i][j] = NewString[(Lines - 1 - i) * MAX_LINE_LENGTH + j];
-		Dialogue[DIALOGUE_LINES - 1 - i][MAX_LINE_LENGTH] = 0;
+		memset(Dialogue[DIALOGUE_LINE_COUNT - 1 - i], 0, MAX_LINE_LENGTH);
+		memmove(Dialogue[DIALOGUE_LINE_COUNT - 1 - i], &NewString[(linesAdded - 1 - i) * MAX_LINE_LENGTH], MAX_LINE_LENGTH);
+		Dialogue[DIALOGUE_LINE_COUNT - 1 - i][MAX_LINE_LENGTH] = 0;
 	}
 
 	NoDrawNeeded[0] = false;
@@ -264,7 +394,7 @@ void Chat::DisplayLines(void)
 		DrawOutline();
 
 		COORD C;
-		for (int i = 0; i < DIALOGUE_LINES; i += 1)
+		for (int i = 0; i < DIALOGUE_LINE_COUNT; i += 1)
 		{
 			C.X = 2;	C.Y = 1 + i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 			for (int j = 0; Dialogue[i][j] != 0; j += 1)
@@ -380,15 +510,15 @@ void Chat::DrawOutline(void)
 {
 	COORD C;
 	C.X = 0;	C.Y = 0;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
-	for (int i = 0; i < 80; i += 1) cout << "-";
-	for (int i = 1; i < DIALOGUE_LINES + 1; i += 1)
+	for (int i = 0; i < 40; i += 1) cout << "-" << std::endl;
+	for (int i = 1; i < DIALOGUE_LINE_COUNT + 1; i += 1)
 	{
 		C.X = 0;	C.Y = i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 		cout << "|";
 		C.X = 79;	C.Y = i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 		cout << "|";
 	}
-	for (int i = 0; i < 80; i += 1) cout << "-";
+	for (int i = 0; i < 40; i += 1) cout << "-";
 	C.X = 0;	C.Y = 0;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 }
 
