@@ -20,21 +20,24 @@ void Display_DEBUG(Server* SERVER)
 	COORD C;
 
 	C.X = 0;	C.Y = 0;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
-	std::cout << "DEBUG DISPLAY: FIRST TEN CLIENTS (" << SendCount << ")";
+	std::cout << "DEBUG DISPLAY: FIRST TEN CLIENTS";
 	C.X = 0;	C.Y = 1;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 	std::cout << "================================";
 
-	int DebugCount = 10;
-	for (int i = 0; i < DebugCount; i += 1)
+	auto userDisplayIndex = 0;
+	auto userConnectionsList = SERVER->GetUserList();
+	for (auto userIter = userConnectionsList.begin(); userIter != userConnectionsList.end() && (++userDisplayIndex < 10); ++userIter)
 	{
-		if (i < SERVER->Client_Count)
+		auto user = (*userIter).first;
+
+		if (userDisplayIndex < int(SERVER->GetUserList().size()))
 		{
-			C.X = 0;	C.Y = 2 + i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
-			std::cout << "#" << i + 1 << ":  " << SERVER->GetClientIP(i) << "                    ";
+			C.X = 0;	C.Y = 2 + userDisplayIndex;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
+			std::cout << "#" << userDisplayIndex + 1 << ":  " << user->IPAddress << "                    ";
 		}
 		else
 		{
-			C.X = 0;	C.Y = 2 + i;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
+			C.X = 0;	C.Y = 2 + userDisplayIndex;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 			std::cout << "                                        ";
 		}
 	}
@@ -55,12 +58,7 @@ int main(void)
 	//	Step 2: EXECUTION
 	while (!KEY_DOWN(VK_F2))
 	{
-		if (chatServer.MainProcess() == 0)
-		{
-			system("cls");
-			std::cout << "Server has shut down" << std::endl;
-			break;
-		}
+		chatServer.MainProcess();
 
 		// Debug data
 		Display_DEBUG(&chatServer);

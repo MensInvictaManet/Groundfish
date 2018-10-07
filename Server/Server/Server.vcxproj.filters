@@ -38,8 +38,5 @@
     <ClInclude Include="GroundfishServer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="SingleLinkList.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
   </ItemGroup>
 </Project>

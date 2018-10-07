@@ -14,9 +14,6 @@ using namespace std;
 #define DIALOGUE_LINE_COUNT	21
 #define MAX_LINE_LENGTH		75
 
-#define SERVER_IP_LENGTH	128
-#define USER_NAME_LENGTH	32
-
 #define CHARACTER_HOLD_TIMER		200
 #define CHARACTER_SHORT_HOLD_TIMER	75
 
@@ -30,7 +27,7 @@ enum MessageIDs
 };
 
 
-void SendMessage_PlayerName(std::string playerName, int socket, char* ip)
+void SendMessage_PlayerName(std::string playerName, int socket, const char* ip)
 {
 	winsockWrapper.ClearBuffer(0);
 	winsockWrapper.WriteChar(3, 0);
@@ -71,133 +68,132 @@ void SendMessage_FileChunksRemaining(std::unordered_map<int, bool>& chunksRemain
 	//  Send a "File Portion Complete" message
 	winsockWrapper.ClearBuffer(0);
 	winsockWrapper.WriteChar(7, 0);
-	winsockWrapper.WriteInt(chunksRemaining.size(), 0);
+	winsockWrapper.WriteInt(int(chunksRemaining.size()), 0);
 	for (auto i = chunksRemaining.begin(); i != chunksRemaining.end(); ++i) winsockWrapper.WriteShort((short)((*i).first), 0);
 	winsockWrapper.SendMessagePacket(socket, ip, SERVER_PORT, 0);
 }
 
-class Chat
+struct FileReceiveTask
 {
-private:
-	struct FileReceiveTask
+	FileReceiveTask(const char* fileName, int fileSize, int fileChunkSize, int fileChunkBufferSize, int socketID, std::string ipAddress) :
+		FileName(fileName),
+		FileSize(fileSize),
+		FileChunkSize(fileChunkSize),
+		FileChunkBufferSize(fileChunkBufferSize),
+		SocketID(socketID),
+		IPAddress(ipAddress),
+		FilePortionIndex(0),
+		FileDownloadComplete(false)
 	{
-		FileReceiveTask(const char* fileName, int fileSize, int fileChunkSize, int fileChunkBufferSize, int socketID, std::string ipAddress) :
-			FileName(fileName),
-			FileSize(fileSize),
-			FileChunkSize(fileChunkSize),
-			FileChunkBufferSize(fileChunkBufferSize),
-			SocketID(socketID),
-			IPAddress(ipAddress),
-			FilePortionIndex(0),
-			FileDownloadComplete(false)
+		FileChunkCount = FileSize / FileChunkSize;
+		if ((FileSize % FileChunkSize) != 0) FileChunkCount += 1;
+		auto nextChunkCount = (FileChunkCount > (FileChunkBufferSize)) ? FileChunkBufferSize : FileChunkCount;
+		ResetChunksToReceiveMap(nextChunkCount);
+		FilePortionCount = FileChunkCount / FileChunkBufferSize;
+		if ((FileChunkCount % FileChunkBufferSize) != 0) FilePortionCount += 1;
+
+		//  Create a file of the proper size based on the server's description
+		std::ofstream outputFile(fileName, std::ios::binary | std::ios::trunc | std::ios_base::beg);
+		outputFile.seekp(fileSize - 1);
+		outputFile.write("", 1);
+		outputFile.close();
+
+		//  Open the file again, this time keeping the file handle open for later writing
+		FileStream.open(FileName.c_str(), std::ios_base::binary | std::ios_base::out | std::ios_base::in);
+		assert(FileStream.good() && !FileStream.bad());
+
+		FileReceiveBuffer = new char[FileChunkSize];
+		SendMessage_FileReceiveReady(FileName, SocketID, IPAddress.c_str());
+	}
+
+	~FileReceiveTask()
+	{
+		delete[] FileReceiveBuffer;
+	}
+
+	inline void ResetChunksToReceiveMap(int chunkCount) { FilePortionsToReceive.clear(); for (auto i = 0; i < chunkCount; ++i)  FilePortionsToReceive[i] = true; }
+
+
+	bool ReceiveFile(std::string& progress)
+	{
+		auto filePortionIndex = winsockWrapper.ReadInt(0);
+		auto chunkIndex = winsockWrapper.ReadInt(0);
+		auto chunkSize = winsockWrapper.ReadInt(0);
+		unsigned char* chunkData = winsockWrapper.ReadChars(0, chunkSize);
+
+		if (filePortionIndex != FilePortionIndex)
 		{
-			FileChunkCount = FileSize / FileChunkSize;
-			if ((FileSize % FileChunkSize) != 0) FileChunkCount += 1;
-			auto nextChunkCount = (FileChunkCount > (FileChunkBufferSize)) ? FileChunkBufferSize : FileChunkCount;
-			ResetChunksToReceiveMap(nextChunkCount);
-			FilePortionCount = FileChunkCount / FileChunkBufferSize;
-			if ((FileChunkCount % FileChunkBufferSize) != 0) FilePortionCount += 1;
-
-			//  Create a file of the proper size based on the server's description
-			std::ofstream outputFile(fileName, std::ios::binary | std::ios::trunc | std::ios_base::beg);
-			outputFile.seekp(fileSize - 1);
-			outputFile.write("", 1);
-			outputFile.close();
-
-			//  Open the file again, this time keeping the file handle open for later writing
-			FileStream.open(FileName.c_str(), std::ios_base::binary | std::ios_base::out | std::ios_base::in);
-			assert(FileStream.good() && !FileStream.bad());
-
-			FileReceiveBuffer = new char[FileChunkSize];
-			SendMessage_FileReceiveReady(FileName, SocketID, IPAddress.c_str());
-		}
-
-		~FileReceiveTask()
-		{
-			delete[] FileReceiveBuffer;
-		}
-
-		inline void ResetChunksToReceiveMap(int chunkCount) { FilePortionsToReceive.clear(); for (auto i = 0; i < chunkCount; ++i)  FilePortionsToReceive[i] = true; }
-		
-
-		bool ReceiveFile(std::string& progress)
-		{
-			auto filePortionIndex = winsockWrapper.ReadInt(0);
-			auto chunkIndex = winsockWrapper.ReadInt(0);
-			auto chunkSize = winsockWrapper.ReadInt(0);
-			unsigned char* chunkData = winsockWrapper.ReadChars(0, chunkSize);
-
-			if (filePortionIndex != FilePortionIndex)
-			{
-				return false;
-			}
-
-			if (FileDownloadComplete) return true;
-
-			auto iter = FilePortionsToReceive.find(chunkIndex);
-			if (iter == FilePortionsToReceive.end()) return false;
-
-			auto chunkPosition = (filePortionIndex * FileChunkSize * FileChunkBufferSize) + (chunkIndex * FileChunkSize) + 0;
-			FileStream.seekp(chunkPosition);
-			FileStream.write((char*)chunkData, chunkSize);
-
-			progress = "Downloaded Portion [" + std::to_string(chunkPosition) + " to " + std::to_string(chunkPosition + chunkSize - 1) + "]";
-			assert(iter != FilePortionsToReceive.end());
-			FilePortionsToReceive.erase(iter);
-
 			return false;
 		}
 
-		bool CheckFilePortionComplete(int portionIndex)
+		if (FileDownloadComplete) return true;
+
+		auto iter = FilePortionsToReceive.find(chunkIndex);
+		if (iter == FilePortionsToReceive.end()) return false;
+
+		auto chunkPosition = (filePortionIndex * FileChunkSize * FileChunkBufferSize) + (chunkIndex * FileChunkSize) + 0;
+		FileStream.seekp(chunkPosition);
+		FileStream.write((char*)chunkData, chunkSize);
+
+		progress = "Downloaded Portion [" + std::to_string(chunkPosition) + " to " + std::to_string(chunkPosition + chunkSize - 1) + "]";
+		assert(iter != FilePortionsToReceive.end());
+		FilePortionsToReceive.erase(iter);
+
+		return false;
+	}
+
+	bool CheckFilePortionComplete(int portionIndex)
+	{
+		if (portionIndex != FilePortionIndex) return false;
+
+		if (FilePortionsToReceive.size() != 0)
 		{
-			if (portionIndex != FilePortionIndex) return false;
-
-			if (FilePortionsToReceive.size() != 0)
-			{
-				SendMessage_FileChunksRemaining(FilePortionsToReceive, SocketID, IPAddress.c_str());
-				return false;
-			}
-			else
-			{
-				SendMessage_FilePortionCompleteConfirmation(FilePortionIndex, SocketID, IPAddress.c_str());
-				if (++FilePortionIndex == FilePortionCount)
-				{
-					FileDownloadComplete = true;
-					FileStream.close();
-				}
-
-				//  Reset the chunk list to ensure we're waiting on the right number of chunks for the next portion
-				auto chunksProcessed = FilePortionIndex * FileChunkBufferSize;
-				auto nextChunkCount = (FileChunkCount > (chunksProcessed + FileChunkBufferSize)) ? FileChunkBufferSize : (FileChunkCount - chunksProcessed);
-				ResetChunksToReceiveMap(nextChunkCount);
-
-				return true;
-			}
+			SendMessage_FileChunksRemaining(FilePortionsToReceive, SocketID, IPAddress.c_str());
+			return false;
 		}
+		else
+		{
+			SendMessage_FilePortionCompleteConfirmation(FilePortionIndex, SocketID, IPAddress.c_str());
+			if (++FilePortionIndex == FilePortionCount)
+			{
+				FileDownloadComplete = true;
+				FileStream.close();
+			}
 
-		inline bool GetFileDownloadComplete() const { return FileDownloadComplete; }
-		inline float GetPercentageComplete() const { return float(FilePortionIndex) / float(FilePortionCount) * 100.0f; }
+			//  Reset the chunk list to ensure we're waiting on the right number of chunks for the next portion
+			auto chunksProcessed = FilePortionIndex * FileChunkBufferSize;
+			auto nextChunkCount = (FileChunkCount > (chunksProcessed + FileChunkBufferSize)) ? FileChunkBufferSize : (FileChunkCount - chunksProcessed);
+			ResetChunksToReceiveMap(nextChunkCount);
 
-		std::string FileName;
-		int FileSize;
-		int SocketID;
-		std::string IPAddress;
-		int FilePortionCount;
-		int FileChunkCount;
-		const int FileChunkSize;
-		const int FileChunkBufferSize;
-		std::ofstream FileStream;
+			return true;
+		}
+	}
 
-		int FilePortionIndex;
-		char* FileReceiveBuffer;
-		std::unordered_map<int, bool> FilePortionsToReceive;
-		bool FileDownloadComplete;
-	};
+	inline bool GetFileDownloadComplete() const { return FileDownloadComplete; }
+	inline float GetPercentageComplete() const { return float(FilePortionIndex) / float(FilePortionCount) * 100.0f; }
 
+	std::string FileName;
+	int FileSize;
+	int SocketID;
+	std::string IPAddress;
+	int FilePortionCount;
+	int FileChunkCount;
+	const int FileChunkSize;
+	const int FileChunkBufferSize;
+	std::ofstream FileStream;
+
+	int FilePortionIndex;
+	char* FileReceiveBuffer;
+	std::unordered_map<int, bool> FilePortionsToReceive;
+	bool FileDownloadComplete;
+};
+
+class Chat
+{
+private:
 	int			ServerSocket;
-	char		ServerIP[SERVER_IP_LENGTH];
 
-	char		Name[USER_NAME_LENGTH];
+	std::string UserName;
 	char		Dialogue[DIALOGUE_LINE_COUNT][MAX_LINE_LENGTH + 1];
 	bool		NoDrawNeeded[2];
 	char		InputLine[MAX_LINE_LENGTH];
@@ -218,32 +214,30 @@ public:
 	void DisplayLines(void);
 	char GetVKStateCharacter(void);
 	void CheckInput(long ticks);
-	void SendChatString(char* String);
+	void SendChatString(const char* String);
 
 	void DrawOutline(void);
 };
 
 bool Chat::Initialize()
 {
-	strcpy_s(ServerIP, SERVER_IP_LENGTH, CHAT_SERVER_IP);
-
 	// Connect to the given server
-	ServerSocket = winsockWrapper.TCPConnect(ServerIP, SERVER_PORT, 1);
+	ServerSocket = winsockWrapper.TCPConnect(CHAT_SERVER_IP, SERVER_PORT, 1);
 	if (ServerSocket < 0) return false;
 
 	system("cls");
 	cout << " Please enter a name for yourself (<16 characters): ";
-	cin.get(Name, USER_NAME_LENGTH);
+	cin >> UserName;
 	cin.get();
 
-	if (strcmp(Name, "") == 0) strcpy_s(Name, strlen("Guest") + 1, "Guest");
+	if (UserName.length() == 0) UserName = "Guest";
 	system("cls");
 
 	// Send name to the server
-	SendMessage_PlayerName(std::string(Name), ServerSocket, ServerIP);
+	SendMessage_PlayerName(UserName, ServerSocket, CHAT_SERVER_IP);
 
 	//  Send file request to the server
-	SendMessage_FileRequest("fileToTransfer.jpeg", ServerSocket, ServerIP);
+	SendMessage_FileRequest("fileToTransfer.jpeg", ServerSocket, CHAT_SERVER_IP);
 
 	// Clear the dialogue
 	for (int i = 0; i < DIALOGUE_LINE_COUNT; i += 1) Dialogue[i][0] = 0;
@@ -270,19 +264,18 @@ void Chat::Shutdown(void)
 
 bool Chat::ReadMessages(void)
 {
-	int MessageBuffer = winsockWrapper.ReceiveMessagePacket(ServerSocket, 0, 0);
-	if (MessageBuffer == 0) return false;
-	if (MessageBuffer < 0) return true;
+	auto messageBufferSize = winsockWrapper.ReceiveMessagePacket(ServerSocket, 0, 0);
+	if (messageBufferSize == 0) return false;
+	if (messageBufferSize < 0) return true;
 
-	char MessageID = winsockWrapper.ReadChar(0);
-
-	switch (MessageID)
+	auto messageID = winsockWrapper.ReadChar(0);
+	switch (messageID)
 	{
 		case MESSAGE_ID_PING_REQUEST:
 			{
 				winsockWrapper.ClearBuffer(0);
 				winsockWrapper.WriteChar(1, 0);
-				winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
+				winsockWrapper.SendMessagePacket(ServerSocket, CHAT_SERVER_IP, SERVER_PORT, 0);
 			}
 			break;
 
@@ -496,8 +489,8 @@ void Chat::CheckInput(long ticks)
 	}
 
 	unsigned int i;
-	for (i = 0; ((InputLine[i] != 0) && (i < MAX_LINE_LENGTH - strlen(Name) - 2)); ++i) {}
-	if (i < (MAX_LINE_LENGTH - strlen(Name) - 2))
+	for (i = 0; ((InputLine[i] != 0) && (i < MAX_LINE_LENGTH - UserName.length() - 2)); ++i) {}
+	if (i < (MAX_LINE_LENGTH - UserName.length() - 2))
 	{
 		InputLine[i] = PressedKey;
 		InputLine[i + 1] = 0;
@@ -522,7 +515,7 @@ void Chat::DrawOutline(void)
 	C.X = 0;	C.Y = 0;	SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), C);
 }
 
-void Chat::SendChatString(char* String)
+void Chat::SendChatString(const char* String)
 {
 	if (strlen(String) == 0) return;
 
@@ -531,7 +524,7 @@ void Chat::SendChatString(char* String)
 
 	//  Form the full string with the users name
 	std::string sendString;
-	sendString += Name;
+	sendString += UserName;
 	sendString += ": ";
 	sendString += String;
 
@@ -541,5 +534,5 @@ void Chat::SendChatString(char* String)
 
 	winsockWrapper.WriteInt(messageSize, 0);
 	winsockWrapper.WriteChars(encrypted, messageSize, 0);
-	winsockWrapper.SendMessagePacket(ServerSocket, ServerIP, SERVER_PORT, 0);
+	winsockWrapper.SendMessagePacket(ServerSocket, CHAT_SERVER_IP, SERVER_PORT, 0);
 }

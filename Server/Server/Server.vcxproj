@@ -121,7 +121,6 @@
     <ClInclude Include="Groundfish.h" />
     <ClInclude Include="GroundfishServer.h" />
     <ClInclude Include="SimpleMD5.h" />
-    <ClInclude Include="SingleLinkList.h" />
     <ClInclude Include="Socket.h" />
     <ClInclude Include="SocketBuffer.h" />
     <ClInclude Include="WinsockWrapper.h" />
